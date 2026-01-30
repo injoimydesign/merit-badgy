@@ -1,0 +1,6 @@
+export { EventDetailPage } from './EventDetailPage'
+export { EventHeader } from './EventHeader'
+export { EventDetails } from './EventDetails'
+export { EventOrganizer } from './EventOrganizer'
+export { ReminderSignup } from './ReminderSignup'
+export { RelatedEvents } from './RelatedEvents'

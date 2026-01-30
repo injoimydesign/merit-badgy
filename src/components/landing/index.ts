@@ -1,0 +1,6 @@
+export { Hero } from './Hero'
+export { QuickFilters } from './QuickFilters'
+export { TrendingBadges } from './TrendingBadges'
+export { FeaturedEvents } from './FeaturedEvents'
+export { Navbar } from './Navbar'
+export { Footer } from './Footer'
