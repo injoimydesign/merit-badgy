@@ -1,62 +1,63 @@
-import { ID, Permission, Role } from 'node-appwrite'
-import { getAppwriteSessionFn } from '../functions/auth'
-import { createSessionClient } from './appwrite'
+import { getSupabaseSessionFn } from '../functions/auth'
+import { createSessionClient } from './supabase'
 
-const APPWRITE_BUCKET_ID = process.env.APPWRITE_BUCKET_ID
+const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET
 
 export async function fileStorage() {
-  if (!APPWRITE_BUCKET_ID) {
-    throw new Error('Missing APPWRITE_BUCKET_ID environment variable')
+  if (!SUPABASE_STORAGE_BUCKET) {
+    throw new Error('Missing SUPABASE_STORAGE_BUCKET environment variable')
   }
 
-  const session = await getAppwriteSessionFn()
+  const session = await getSupabaseSessionFn()
 
   if (!session) {
     console.error('No valid session found')
     return
   }
 
-  const { storage } = await createSessionClient(session)
+  const supabase = createSessionClient(session.accessToken, session.refreshToken)
 
   return {
-    create(userId: string, file: File) {
-      return storage.createFile({
-        bucketId: APPWRITE_BUCKET_ID,
-        file,
-        fileId: ID.unique(),
-        permissions: [
-          Permission.read(Role.user(userId)),
-          Permission.update(Role.user(userId)),
-          Permission.delete(Role.user(userId)),
-        ],
-      })
+    async create(_userId: string, file: File) {
+      const fileExt = file.name.split('.').pop()
+      const filePath = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
+
+      const { data, error } = await supabase.storage
+        .from(SUPABASE_STORAGE_BUCKET!)
+        .upload(filePath, file)
+
+      if (error) throw error
+      return data
     },
 
-    read(fileId: string) {
-      return storage.getFileView({
-        bucketId: APPWRITE_BUCKET_ID,
-        fileId,
-      })
+    async read(filePath: string) {
+      const { data } = supabase.storage
+        .from(SUPABASE_STORAGE_BUCKET!)
+        .getPublicUrl(filePath)
+      return data.publicUrl
     },
 
-    delete(fileId: string) {
-      return storage.deleteFile({
-        bucketId: APPWRITE_BUCKET_ID,
-        fileId,
-      })
+    async delete(filePath: string) {
+      const { error } = await supabase.storage
+        .from(SUPABASE_STORAGE_BUCKET!)
+        .remove([filePath])
+      if (error) throw error
     },
 
-    listFiles() {
-      return storage.listFiles({
-        bucketId: APPWRITE_BUCKET_ID,
-      })
+    async listFiles() {
+      const { data, error } = await supabase.storage
+        .from(SUPABASE_STORAGE_BUCKET!)
+        .list()
+      if (error) throw error
+      return data
     },
 
-    downloadFile(fileId: string) {
-      return storage.getFileDownload({
-        bucketId: APPWRITE_BUCKET_ID,
-        fileId,
-      })
+    async downloadFile(filePath: string) {
+      const { data, error } = await supabase.storage
+        .from(SUPABASE_STORAGE_BUCKET!)
+        .download(filePath)
+      if (error) throw error
+      return data
     },
   }
 }
