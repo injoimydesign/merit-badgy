@@ -1,11 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
-import {
-  createFileRoute,
-  Link,
-  useNavigate,
-  useSearch,
-} from '@tanstack/react-router'
-import { z } from 'zod'
+import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { AuthCard } from '@/components/auth/auth-card'
 import { AuthForm } from '@/components/auth/auth-form'
 import { AuthField } from '@/components/auth/auth-field'
@@ -13,18 +7,13 @@ import { resetPasswordFn } from '@/server/functions/auth'
 import { useServerFn } from '@tanstack/react-start'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { CheckCircle2, AlertCircle } from 'lucide-react'
-
-const searchSchema = z.object({
-  userId: z.string().optional(),
-  secret: z.string().optional(),
-})
+import { z } from 'zod'
 
 export const Route = createFileRoute('/_auth/reset-password')({
   component: ResetPasswordPage,
-  validateSearch: searchSchema,
 })
 
 const resetPasswordSchema = z
@@ -40,9 +29,12 @@ const resetPasswordSchema = z
   })
 
 function ResetPasswordPage() {
-  const search = useSearch({ from: '/_auth/reset-password' })
   const navigate = useNavigate()
   const [isSuccess, setIsSuccess] = useState(false)
+  const [accessToken, setAccessToken] = useState<string | null>(null)
+  const [refreshToken, setRefreshToken] = useState<string | null>(null)
+  const [tokenType, setTokenType] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
   const resetPassword = useServerFn(resetPasswordFn)
   const form = useForm({
     resolver: zodResolver(resetPasswordSchema),
@@ -52,16 +44,26 @@ function ResetPasswordPage() {
     },
   })
 
+  // Extract tokens from URL hash (Supabase puts them there after password reset email)
+  useEffect(() => {
+    const hash = window.location.hash.substring(1)
+    const params = new URLSearchParams(hash)
+    setAccessToken(params.get('access_token'))
+    setRefreshToken(params.get('refresh_token'))
+    setTokenType(params.get('type'))
+    setLoaded(true)
+  }, [])
+
   const resetPasswordMutation = useMutation({
     mutationFn: async (data: z.infer<typeof resetPasswordSchema>) => {
-      if (!search.userId || !search.secret) {
+      if (!accessToken || !refreshToken) {
         throw new Error('Invalid recovery link')
       }
 
       await resetPassword({
         data: {
-          userId: search.userId,
-          secret: search.secret,
+          accessToken,
+          refreshToken,
           password: data.password,
           confirmPassword: data.confirmPassword,
         },
@@ -70,7 +72,6 @@ function ResetPasswordPage() {
     onSuccess: () => {
       setIsSuccess(true)
       form.reset()
-      // Redirect to sign in after 3 seconds
       setTimeout(() => {
         void navigate({ to: '/sign-in' })
       }, 3000)
@@ -83,7 +84,11 @@ function ResetPasswordPage() {
     },
   })
 
-  if (!search.userId || !search.secret) {
+  if (!loaded) {
+    return null
+  }
+
+  if (!accessToken || !refreshToken || tokenType !== 'recovery') {
     return (
       <AuthCard
         title="Invalid recovery link"

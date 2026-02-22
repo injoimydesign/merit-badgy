@@ -1,8 +1,7 @@
 import { createServerFn } from '@tanstack/react-start'
 import z from 'zod'
 import { redirect } from '@tanstack/react-router'
-import { createAdminClient, createSessionClient } from '../lib/appwrite'
-import { AppwriteException, ID } from 'node-appwrite'
+import { createAdminClient, createSessionClient } from '../lib/supabase'
 import {
   deleteCookie,
   getCookie,
@@ -11,61 +10,50 @@ import {
   getRequestHeader,
 } from '@tanstack/react-start/server'
 
-export const getAppwriteSessionFn = createServerFn({ method: 'GET' }).handler(
-  async () => {
-    const session = getCookie(`appwrite-session-secret`)
+export const getSupabaseSessionFn = createServerFn({ method: 'GET' }).handler(async () => {
+  const accessToken = getCookie('sb-access-token')
+  const refreshToken = getCookie('sb-refresh-token')
 
-    if (!session) {
-      return null
-    }
+  if (!accessToken || !refreshToken) {
+    return null
+  }
 
-    return session
-  },
-)
-
-const setAppwriteSessionCookiesSchema = z.object({
-  id: z.string(),
-  secret: z.string(),
-  expires: z.string().optional(), // ISO 8601 format string from Appwrite session.expire
+  return { accessToken, refreshToken }
 })
 
-export const setAppwriteSessionCookiesFn = createServerFn({ method: 'POST' })
-  .inputValidator(setAppwriteSessionCookiesSchema)
-  .handler(
-    async ({
-      data,
-    }: {
-      data: z.infer<typeof setAppwriteSessionCookiesSchema>
-    }) => {
-      const { id, secret, expires } = data
+const setSupabaseSessionCookiesSchema = z.object({
+  accessToken: z.string(),
+  refreshToken: z.string(),
+  expiresAt: z.number().optional(),
+})
 
-      // Calculate maxAge in seconds (default to 30 days if no expiration provided)
-      // Appwrite expire is always an ISO 8601 format string (e.g., "2020-10-15T06:38:00.000+00:00")
-      let maxAge = 30 * 24 * 60 * 60 // Default: 30 days in seconds
-      if (expires) {
-        const expireTime = Math.floor(new Date(expires).getTime() / 1000)
-        const now = Math.floor(Date.now() / 1000)
-        maxAge = Math.max(0, expireTime - now)
-      }
+export const setSupabaseSessionCookiesFn = createServerFn({ method: 'POST' })
+  .inputValidator(setSupabaseSessionCookiesSchema)
+  .handler(async ({ data }: { data: z.infer<typeof setSupabaseSessionCookiesSchema> }) => {
+    const { accessToken, refreshToken, expiresAt } = data
 
-      // Set cookies with explicit expiration
-      setCookie(`appwrite-session-secret`, secret, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'none',
-        maxAge,
-        path: '/',
-      })
+    let maxAge = 30 * 24 * 60 * 60 // Default: 30 days in seconds
+    if (expiresAt) {
+      const now = Math.floor(Date.now() / 1000)
+      maxAge = Math.max(0, expiresAt - now)
+    }
 
-      setCookie(`appwrite-session-id`, id, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'none',
-        maxAge,
-        path: '/',
-      })
-    },
-  )
+    setCookie('sb-access-token', accessToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      maxAge,
+      path: '/',
+    })
+
+    setCookie('sb-refresh-token', refreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      maxAge: 30 * 24 * 60 * 60, // Refresh tokens are long-lived
+      path: '/',
+    })
+  })
 
 const signUpInSchema = z.object({
   email: z.email('Please enter a valid email address'),
@@ -77,28 +65,23 @@ export const signUpFn = createServerFn({ method: 'POST' })
   .inputValidator(signUpInSchema)
   .handler(async ({ data }) => {
     const { email, password, redirect: redirectUrl } = data
-    const { account } = createAdminClient()
+    const supabase = createAdminClient()
 
-    try {
-      await account.create({ userId: ID.unique(), email, password })
-      const session = await account.createEmailPasswordSession({
-        email,
-        password,
-      })
-      await setAppwriteSessionCookiesFn({
+    const { data: authData, error } = await supabase.auth.signUp({ email, password })
+
+    if (error) {
+      setResponseStatus(error.status ?? 400)
+      throw { message: error.message, status: error.status ?? 400 }
+    }
+
+    if (authData.session) {
+      await setSupabaseSessionCookiesFn({
         data: {
-          id: session.$id,
-          secret: session.secret,
-          expires: session.expire || undefined, // ISO 8601 format string
+          accessToken: authData.session.access_token,
+          refreshToken: authData.session.refresh_token,
+          expiresAt: authData.session.expires_at,
         },
       })
-    } catch (_error) {
-      const error = _error as AppwriteException
-      setResponseStatus(error.code)
-      throw {
-        message: error.message,
-        status: error.code,
-      }
     }
 
     if (redirectUrl) {
@@ -112,28 +95,25 @@ export const signInFn = createServerFn({ method: 'POST' })
   .inputValidator(signUpInSchema)
   .handler(async ({ data }) => {
     const { email, password, redirect: redirectUrl } = data
+    const supabase = createAdminClient()
 
-    try {
-      const { account } = createAdminClient()
-      const session = await account.createEmailPasswordSession({
-        email,
-        password,
-      })
-      await setAppwriteSessionCookiesFn({
-        data: {
-          id: session.$id,
-          secret: session.secret,
-          expires: session.expire || undefined, // ISO 8601 format string
-        },
-      })
-    } catch (_error) {
-      const error = _error as AppwriteException
-      setResponseStatus(error.code)
-      throw {
-        message: error.message,
-        status: error.code,
-      }
+    const { data: authData, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    })
+
+    if (error) {
+      setResponseStatus(error.status ?? 400)
+      throw { message: error.message, status: error.status ?? 400 }
     }
+
+    await setSupabaseSessionCookiesFn({
+      data: {
+        accessToken: authData.session.access_token,
+        refreshToken: authData.session.refresh_token,
+        expiresAt: authData.session.expires_at,
+      },
+    })
 
     if (redirectUrl) {
       throw redirect({ to: redirectUrl })
@@ -144,59 +124,52 @@ export const signInFn = createServerFn({ method: 'POST' })
 
 export const signOutFn = createServerFn({ method: 'GET' }).handler(async () => {
   try {
-    const session = await getAppwriteSessionFn()
+    const session = await getSupabaseSessionFn()
 
     if (session) {
-      const client = await createSessionClient(session)
-      // Delete the session on Appwrite server
-      await client.account.deleteSession({ sessionId: 'current' })
+      const supabase = createSessionClient(session.accessToken, session.refreshToken)
+      await supabase.auth.signOut()
     }
   } catch (error) {
-    // Even if session deletion fails, we still want to clear local cookies
-    console.error('Error deleting session:', error)
+    console.error('Error signing out:', error)
   } finally {
-    // Always delete the cookies
     clearAuthCookies()
   }
 })
 
-export const authMiddleware = createServerFn({ method: 'GET' }).handler(
-  async () => {
-    const currentUser = await getCurrentUser()
-
-    return {
-      currentUser,
-    }
-  },
-)
+export const authMiddleware = createServerFn({ method: 'GET' }).handler(async () => {
+  const currentUser = await getCurrentUser()
+  return { currentUser }
+})
 
 const clearAuthCookies = () => {
-  deleteCookie(`appwrite-session-secret`)
-  deleteCookie(`appwrite-session-id`)
-  deleteCookie(`a_session_${process.env.APPWRITE_PROJECT_ID}`)
+  deleteCookie('sb-access-token')
+  deleteCookie('sb-refresh-token')
 }
 
-export const getCurrentUser = createServerFn({ method: 'GET' }).handler(
-  async () => {
-    const session = await getAppwriteSessionFn()
+export const getCurrentUser = createServerFn({ method: 'GET' }).handler(async () => {
+  const session = await getSupabaseSessionFn()
 
-    if (!session) {
-      return null
-    }
+  if (!session) {
+    return null
+  }
 
-    try {
-      const client = await createSessionClient(session)
-      const currentUser = await client.account.get()
-      return currentUser
-    } catch (_error) {
-      const error = _error as AppwriteException
-      if (error.code === 401) {
+  try {
+    const supabase = createSessionClient(session.accessToken, session.refreshToken)
+    const { data, error } = await supabase.auth.getUser()
+
+    if (error) {
+      if (error.status === 401) {
         clearAuthCookies()
       }
       return null
     }
-  },
-)
+
+    return data.user
+  } catch {
+    return null
+  }
+})
 
 const forgotPasswordSchema = z.object({
   email: z.string().email('Please enter a valid email address'),
@@ -206,35 +179,32 @@ export const forgotPasswordFn = createServerFn({ method: 'POST' })
   .inputValidator(forgotPasswordSchema)
   .handler(async ({ data }) => {
     const { email } = data
-    const { account } = createAdminClient()
+    const supabase = createAdminClient()
 
-    try {
-      // Get the base URL from the origin header (includes protocol)
-      const origin = getRequestHeader('origin')
-      if (!origin) {
-        throw new Error('Missing origin header')
-      }
-      const resetUrl = `${origin}/reset-password`
+    const origin = getRequestHeader('origin')
+    if (!origin) {
+      throw new Error('Missing origin header')
+    }
+    const resetUrl = `${origin}/reset-password`
 
-      await account.createRecovery({ email, url: resetUrl })
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: resetUrl,
+    })
 
-      return {
-        success: true,
-        message: 'Password recovery email sent successfully',
-      }
-    } catch (_error) {
-      const error = _error as AppwriteException
-      setResponseStatus(error.code)
-      throw {
-        message: error.message,
-        status: error.code,
-      }
+    if (error) {
+      setResponseStatus(error.status ?? 400)
+      throw { message: error.message, status: error.status ?? 400 }
+    }
+
+    return {
+      success: true,
+      message: 'Password recovery email sent successfully',
     }
   })
 
 const resetPasswordSchema = z.object({
-  userId: z.string().min(1, 'User ID is required'),
-  secret: z.string().min(1, 'Secret is required'),
+  accessToken: z.string().min(1, 'Access token is required'),
+  refreshToken: z.string().min(1, 'Refresh token is required'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
   confirmPassword: z.string().min(8, 'Password must be at least 8 characters'),
 })
@@ -242,34 +212,24 @@ const resetPasswordSchema = z.object({
 export const resetPasswordFn = createServerFn({ method: 'POST' })
   .inputValidator(resetPasswordSchema)
   .handler(async ({ data }) => {
-    const { userId, secret, password, confirmPassword } = data
+    const { accessToken, refreshToken, password, confirmPassword } = data
 
     if (password !== confirmPassword) {
       setResponseStatus(400)
-      throw {
-        message: 'Passwords do not match',
-        status: 400,
-      }
+      throw { message: 'Passwords do not match', status: 400 }
     }
 
-    try {
-      const { account } = createAdminClient()
-      await account.updateRecovery({
-        userId,
-        secret,
-        password,
-      })
+    const supabase = createSessionClient(accessToken, refreshToken)
 
-      return {
-        success: true,
-        message: 'Password reset successfully',
-      }
-    } catch (_error) {
-      const error = _error as AppwriteException
-      setResponseStatus(error.code)
-      throw {
-        message: error.message,
-        status: error.code,
-      }
+    const { error } = await supabase.auth.updateUser({ password })
+
+    if (error) {
+      setResponseStatus(error.status ?? 400)
+      throw { message: error.message, status: error.status ?? 400 }
+    }
+
+    return {
+      success: true,
+      message: 'Password reset successfully',
     }
   })

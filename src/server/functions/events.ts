@@ -1,9 +1,8 @@
 import { createServerFn } from '@tanstack/react-start'
 import { z } from 'zod'
 import { db } from '@/server/lib/db'
-import { Query } from 'node-appwrite'
 import { authMiddleware } from './auth'
-import type { MeritBadgeEvents } from '@/server/lib/appwrite.types'
+import type { MeritBadgeEvent } from '@/server/lib/supabase.types'
 
 // Schema for listing events with filters
 const listEventsSchema = z.object({
@@ -25,59 +24,28 @@ export const listEventsFn = createServerFn({ method: 'GET' })
   .inputValidator(listEventsSchema.optional())
   .handler(async ({ data }) => {
     const filters = data ?? { limit: 20, offset: 0 }
-    const queries: string[] = [
-      Query.equal('status', ['approved']),
-      Query.orderAsc('eventDate'),
-      Query.limit(filters.limit),
-      Query.offset(filters.offset),
-    ]
-
-    // Add search query filter
-    if (filters.query) {
-      queries.push(Query.search('badgeName', filters.query))
-    }
-
-    // Add badge name filter
-    if (filters.badgeName) {
-      queries.push(Query.equal('badgeName', [filters.badgeName]))
-    }
-
-    // Add subject area filter
-    if (filters.subjectArea) {
-      queries.push(Query.equal('subjectArea', [filters.subjectArea]))
-    }
-
-    // Add virtual filter
-    if (filters.isVirtual !== undefined) {
-      queries.push(Query.equal('isVirtual', [filters.isVirtual]))
-    }
-
-    // Add eagle required filter
-    if (filters.isEagleRequired !== undefined) {
-      queries.push(Query.equal('isEagleRequired', [filters.isEagleRequired]))
-    }
-
-    // Add date range filters
-    if (filters.startDate) {
-      queries.push(Query.greaterThanEqual('eventDate', filters.startDate))
-    }
-
-    if (filters.endDate) {
-      queries.push(Query.lessThanEqual('eventDate', filters.endDate))
-    }
 
     try {
-      const result = await db.meritBadgeEvents.list(queries)
+      const result = await db.meritBadgeEvents.list({
+        status: 'approved',
+        badge_name: filters.badgeName,
+        subject_area: filters.subjectArea,
+        is_virtual: filters.isVirtual,
+        is_eagle_required: filters.isEagleRequired,
+        startDate: filters.startDate,
+        endDate: filters.endDate,
+        searchQuery: filters.query,
+        limit: filters.limit,
+        offset: filters.offset,
+        orderBy: { column: 'event_date', ascending: true },
+      })
       return {
         events: result.rows.map(serializeEvent),
         total: result.total,
       }
     } catch (error) {
       console.error('Error listing events:', error)
-      return {
-        events: [],
-        total: 0,
-      }
+      return { events: [], total: 0 }
     }
   })
 
@@ -90,7 +58,7 @@ export const getEventFn = createServerFn({ method: 'GET' })
 
       // Increment view count
       await db.meritBadgeEvents.update(data.id, {
-        viewCount: (event.viewCount || 0) + 1,
+        view_count: (event.view_count || 0) + 1,
       })
 
       return { event: serializeEvent(event) }
@@ -101,74 +69,68 @@ export const getEventFn = createServerFn({ method: 'GET' })
   })
 
 // Get featured/upcoming events for homepage
-export const getFeaturedEventsFn = createServerFn({ method: 'GET' }).handler(
-  async () => {
-    const today = new Date().toISOString().split('T')[0]
+export const getFeaturedEventsFn = createServerFn({ method: 'GET' }).handler(async () => {
+  const today = new Date().toISOString().split('T')[0]
 
-    try {
-      const result = await db.meritBadgeEvents.list([
-        Query.equal('status', ['approved']),
-        Query.greaterThanEqual('eventDate', today),
-        Query.orderAsc('eventDate'),
-        Query.limit(6),
-      ])
+  try {
+    const result = await db.meritBadgeEvents.list({
+      status: 'approved',
+      startDate: today,
+      limit: 6,
+      orderBy: { column: 'event_date', ascending: true },
+    })
 
-      return {
-        events: result.rows.map(serializeEvent),
-      }
-    } catch (error) {
-      console.error('Error getting featured events:', error)
-      return { events: [] }
-    }
-  },
-)
+    return { events: result.rows.map(serializeEvent) }
+  } catch (error) {
+    console.error('Error getting featured events:', error)
+    return { events: [] }
+  }
+})
 
 // Get trending badges (most viewed/saved)
-export const getTrendingBadgesFn = createServerFn({ method: 'GET' }).handler(
-  async () => {
-    try {
-      const result = await db.meritBadgeEvents.list([
-        Query.equal('status', ['approved']),
-        Query.orderDesc('viewCount'),
-        Query.limit(20),
-      ])
+export const getTrendingBadgesFn = createServerFn({ method: 'GET' }).handler(async () => {
+  try {
+    const result = await db.meritBadgeEvents.list({
+      status: 'approved',
+      limit: 20,
+      orderBy: { column: 'view_count', ascending: false },
+    })
 
-      // Group by badge name and count
-      const badgeCounts = new Map<
-        string,
-        { count: number; isEagle: boolean; subjectArea: string | null }
-      >()
+    // Group by badge name and count
+    const badgeCounts = new Map<
+      string,
+      { count: number; isEagle: boolean; subjectArea: string | null }
+    >()
 
-      for (const event of result.rows) {
-        const existing = badgeCounts.get(event.badgeName)
-        if (existing) {
-          existing.count++
-        } else {
-          badgeCounts.set(event.badgeName, {
-            count: 1,
-            isEagle: event.isEagleRequired,
-            subjectArea: event.subjectArea,
-          })
-        }
+    for (const event of result.rows) {
+      const existing = badgeCounts.get(event.badge_name)
+      if (existing) {
+        existing.count++
+      } else {
+        badgeCounts.set(event.badge_name, {
+          count: 1,
+          isEagle: event.is_eagle_required,
+          subjectArea: event.subject_area,
+        })
       }
-
-      const trending = Array.from(badgeCounts.entries())
-        .map(([name, data]) => ({
-          name,
-          classCount: data.count,
-          isEagle: data.isEagle,
-          subjectArea: data.subjectArea,
-        }))
-        .sort((a, b) => b.classCount - a.classCount)
-        .slice(0, 6)
-
-      return { badges: trending }
-    } catch (error) {
-      console.error('Error getting trending badges:', error)
-      return { badges: [] }
     }
-  },
-)
+
+    const trending = Array.from(badgeCounts.entries())
+      .map(([name, data]) => ({
+        name,
+        classCount: data.count,
+        isEagle: data.isEagle,
+        subjectArea: data.subjectArea,
+      }))
+      .sort((a, b) => b.classCount - a.classCount)
+      .slice(0, 6)
+
+    return { badges: trending }
+  } catch (error) {
+    console.error('Error getting trending badges:', error)
+    return { badges: [] }
+  }
+})
 
 // Save/unsave an event (requires auth)
 export const toggleSaveEventFn = createServerFn({ method: 'POST' })
@@ -179,12 +141,10 @@ export const toggleSaveEventFn = createServerFn({ method: 'POST' })
       throw new Error('Unauthorized')
     }
 
-    // For now, just increment the save count
-    // In a full implementation, we'd track which users saved which events
     try {
       const event = await db.meritBadgeEvents.get(data.eventId)
       await db.meritBadgeEvents.update(data.eventId, {
-        saveCount: (event.saveCount || 0) + 1,
+        save_count: (event.save_count || 0) + 1,
       })
       return { success: true }
     } catch (error) {
@@ -194,30 +154,30 @@ export const toggleSaveEventFn = createServerFn({ method: 'POST' })
   })
 
 // Helper to serialize event for client
-function serializeEvent(event: MeritBadgeEvents) {
+function serializeEvent(event: MeritBadgeEvent) {
   return {
-    id: event.$id,
-    badgeName: event.badgeName,
+    id: event.id,
+    badgeName: event.badge_name,
     title: event.title,
     description: event.description,
-    eventDate: event.eventDate,
-    eventTime: event.eventTime,
+    eventDate: event.event_date,
+    eventTime: event.event_time,
     location: event.location,
-    isVirtual: event.isVirtual,
+    isVirtual: event.is_virtual,
     latitude: event.latitude,
     longitude: event.longitude,
-    subjectArea: event.subjectArea,
-    isEagleRequired: event.isEagleRequired,
+    subjectArea: event.subject_area,
+    isEagleRequired: event.is_eagle_required,
     prerequisites: event.prerequisites,
-    organizerName: event.organizerName,
-    organizerContact: event.organizerContact,
-    registrationUrl: event.registrationUrl,
-    sourceUrl: event.sourceUrl,
-    imageUrl: event.imageUrl,
-    viewCount: event.viewCount,
-    saveCount: event.saveCount,
-    createdAt: event.$createdAt,
-    updatedAt: event.$updatedAt,
+    organizerName: event.organizer_name,
+    organizerContact: event.organizer_contact,
+    registrationUrl: event.registration_url,
+    sourceUrl: event.source_url,
+    imageUrl: event.image_url,
+    viewCount: event.view_count,
+    saveCount: event.save_count,
+    createdAt: event.created_at,
+    updatedAt: event.updated_at,
   }
 }
 
